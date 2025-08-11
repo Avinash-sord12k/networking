@@ -58,55 +58,22 @@ function forwardToTunnel(clientSocket) {
   
   console.log('Forwarding client to tunnel');
   
-  // Create a unique connection ID
-  const connectionId = Math.random().toString(36).substr(2, 9);
-  
-  // Send connection start signal
-  tunnelSocket.write(`CONNECT:${connectionId}\n`);
-  
-  // Forward data from client to tunnel
-  clientSocket.on('data', (data) => {
-    if (tunnelSocket) {
-      tunnelSocket.write(`DATA:${connectionId}:${data.length}\n`);
-      tunnelSocket.write(data);
-    }
-  });
+  // Simple approach: Just pipe the sockets directly
+  // This avoids all the complex protocol issues
+  clientSocket.pipe(tunnelSocket, { end: false });
+  tunnelSocket.pipe(clientSocket, { end: false });
   
   // Handle client disconnect
   clientSocket.on('close', () => {
     console.log('Client disconnected');
-    if (tunnelSocket) {
-      tunnelSocket.write(`CLOSE:${connectionId}\n`);
-    }
+    clientSocket.unpipe(tunnelSocket);
+    tunnelSocket.unpipe(clientSocket);
   });
   
   clientSocket.on('error', (err) => {
     console.error('Client socket error:', err);
-    if (tunnelSocket) {
-      tunnelSocket.write(`CLOSE:${connectionId}\n`);
-    }
-  });
-  
-  // Handle responses from tunnel back to client
-  const handleTunnelData = (data) => {
-    const lines = data.toString().split('\n');
-    for (const line of lines) {
-      if (line.startsWith(`RESPONSE:${connectionId}:`)) {
-        const responseData = line.substring(`RESPONSE:${connectionId}:`.length);
-        clientSocket.write(responseData);
-      } else if (line === `CLOSE:${connectionId}`) {
-        clientSocket.end();
-      }
-    }
-  };
-  
-  tunnelSocket.on('data', handleTunnelData);
-  
-  // Clean up listener when client disconnects
-  clientSocket.on('close', () => {
-    if (tunnelSocket) {
-      tunnelSocket.removeListener('data', handleTunnelData);
-    }
+    clientSocket.unpipe(tunnelSocket);
+    tunnelSocket.unpipe(clientSocket);
   });
 }
 

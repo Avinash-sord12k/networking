@@ -19,6 +19,7 @@ function getRandomText() {
 }
 
 app.get('/test', (req, res) => {
+  console.log("request recieved from: ", req.host)
   res.json({ message: getRandomText() });
 });
 
