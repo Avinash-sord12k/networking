@@ -7,6 +7,8 @@ const TUNNEL_PORT = 4001; // Port for tunnel connections from local machine
 let tunnelSocket = null;
 const pendingClients = [];
 
+const activeClients = new Map();
+
 // Server for tunnel connections from local machine
 const tunnelServer = net.createServer(socket => {
   console.log('Tunnel client connected from local machine');
@@ -18,9 +20,60 @@ const tunnelServer = net.createServer(socket => {
     forwardToTunnel(clientSocket);
   }
   
+  // Handle responses from tunnel
+  let buffer = Buffer.alloc(0);
+  socket.on('data', (data) => {
+    buffer = Buffer.concat([buffer, data]);
+    
+    while (buffer.length > 0) {
+      const newlineIndex = buffer.indexOf('\n');
+      if (newlineIndex === -1) break;
+      
+      const line = buffer.slice(0, newlineIndex).toString();
+      buffer = buffer.slice(newlineIndex + 1);
+      
+      if (line.startsWith('RESPONSE:')) {
+        const parts = line.split(':');
+        const connectionId = parts[1];
+        const dataLength = parseInt(parts[2]);
+        
+        if (buffer.length >= dataLength) {
+          const responseData = buffer.slice(0, dataLength);
+          buffer = buffer.slice(dataLength);
+          
+          // Find the client and send response
+          for (const [clientSocket, id] of activeClients) {
+            if (id === connectionId) {
+              clientSocket.write(responseData);
+              break;
+            }
+          }
+        } else {
+          // Put the line back and wait for more data
+          buffer = Buffer.concat([Buffer.from(line + '\n'), buffer]);
+          break;
+        }
+      } else if (line.startsWith('CLOSE:')) {
+        const connectionId = line.substring(6);
+        for (const [clientSocket, id] of activeClients) {
+          if (id === connectionId) {
+            clientSocket.end();
+            activeClients.delete(clientSocket);
+            break;
+          }
+        }
+      }
+    }
+  });
+  
   socket.on('close', () => {
     console.log('Tunnel connection closed');
     tunnelSocket = null;
+    // Close all active clients
+    for (const [clientSocket] of activeClients) {
+      clientSocket.end();
+    }
+    activeClients.clear();
   });
   
   socket.on('error', (err) => {
@@ -58,23 +111,49 @@ function forwardToTunnel(clientSocket) {
   
   console.log('Forwarding client to tunnel');
   
-  // Simple approach: Just pipe the sockets directly
-  // This avoids all the complex protocol issues
-  clientSocket.pipe(tunnelSocket, { end: false });
-  tunnelSocket.pipe(clientSocket, { end: false });
+  // Create a unique connection ID for multiplexing
+  const connectionId = Math.random().toString(36).substr(2, 9);
+  
+  // Send new connection signal
+  const connectMsg = Buffer.concat([
+    Buffer.from('CONNECT:'),
+    Buffer.from(connectionId),
+    Buffer.from('\n')
+  ]);
+  tunnelSocket.write(connectMsg);
+  
+  // Forward data from client to tunnel with connection ID
+  clientSocket.on('data', (data) => {
+    if (tunnelSocket && !tunnelSocket.destroyed) {
+      const header = Buffer.concat([
+        Buffer.from('DATA:'),
+        Buffer.from(connectionId),
+        Buffer.from(':'),
+        Buffer.from(data.length.toString()),
+        Buffer.from('\n')
+      ]);
+      tunnelSocket.write(Buffer.concat([header, data]));
+    }
+  });
   
   // Handle client disconnect
   clientSocket.on('close', () => {
-    console.log('Client disconnected');
-    clientSocket.unpipe(tunnelSocket);
-    tunnelSocket.unpipe(clientSocket);
+    console.log(`Client ${connectionId} disconnected`);
+    if (tunnelSocket && !tunnelSocket.destroyed) {
+      tunnelSocket.write(`CLOSE:${connectionId}\n`);
+    }
   });
   
   clientSocket.on('error', (err) => {
-    console.error('Client socket error:', err);
-    clientSocket.unpipe(tunnelSocket);
-    tunnelSocket.unpipe(clientSocket);
+    console.error(`Client ${connectionId} error:`, err);
+    if (tunnelSocket && !tunnelSocket.destroyed) {
+      tunnelSocket.write(`CLOSE:${connectionId}\n`);
+    }
   });
+  
+  // Store client for response handling
+  clientSocket._connectionId = connectionId;
+  activeClients.set(clientSocket, connectionId);
 }
 
 tunnelServer.listen(TUNNEL_PORT, () => {
